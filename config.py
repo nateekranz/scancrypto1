@@ -1,5 +1,5 @@
 # ====================================
-# FILE: config.py (v3.0 - Final)
+# FILE: config.py (v3.1 - Final Bugfix Version)
 # ====================================
 
 # --- TELEGRAM CONFIGURATION ---
@@ -14,12 +14,12 @@ MAX_WORKERS = 10
 # --- DYNAMIC LIQUIDITY FILTERS ---
 STRICT_MIN_VOLUME_24H = 50_000_000
 STRICT_MIN_OPEN_INTEREST = 50_000_000
-RELAXED_MIN_VOLUME_24H = 20_000_000  # ปรับลดลงเล็กน้อย
-RELAXED_MIN_OPEN_INTEREST = 20_000_000 # ปรับลดลงเล็กน้อย
+RELAXED_MIN_VOLUME_24H = 20_000_000
+RELAXED_MIN_OPEN_INTEREST = 20_000_000
 
-# --- [ใหม่] DYNAMIC HEALTH SCORE THRESHOLDS ---
-STRICT_MIN_HEALTH_SCORE = 50  # เกณฑ์คะแนนสำหรับตลาด Trending
-RELAXED_MIN_HEALTH_SCORE = 35   # เกณฑ์คะแนนสำหรับตลาด Quiet/Choppy
+# --- DYNAMIC HEALTH SCORE THRESHOLDS ---
+STRICT_MIN_HEALTH_SCORE = 50
+RELAXED_MIN_HEALTH_SCORE = 30   # ปรับลดลงเล็กน้อยเพื่อให้ยืดหยุ่นขึ้น
 
 # --- RANKING & REPORTING ---
 TOP_BULLISH_COUNT = 10
@@ -34,7 +34,7 @@ ATR_PERIOD = 14
 
 # --- MARKET REGIME THRESHOLDS (ATR %) ---
 ATR_TRENDING_THRESHOLD = 2.5
-ATR_QUIET_THRESHOLD = 1.2 # ปรับขึ้นเล็กน้อยเพื่อจับสภาวะ Ranging ได้ดีขึ้น
+ATR_QUIET_THRESHOLD = 1.2
 
 # --- TREND STAGE / OVEREXTENDED THRESHOLDS ---
 MAX_DISTANCE_FROM_EMA_PERCENT = 15.0

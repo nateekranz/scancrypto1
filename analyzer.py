@@ -1,6 +1,5 @@
 # ====================================
-# FILE: analyzer.py (v2.0 - Refactored & Dynamic)
-# DESCRIPTION: Core analysis engine for macro and micro market conditions.
+# FILE: analyzer.py (v3.1 - Final Bugfix Version)
 # ====================================
 
 import logging
@@ -19,45 +18,26 @@ class MarketAnalyzer:
         self.session = HTTP(testnet=False)
 
     def run_full_analysis(self) -> Dict:
-        """
-        Orchestrates the entire analysis pipeline: macro, micro, ranking, and returns a single report-ready dictionary.
-        This is the main public method to be called from main.py.
-        """
-        # Step 1: Analyze Macro Conditions ONCE.
+        """Orchestrates the entire analysis pipeline."""
         macro_data = self._analyze_macro_conditions()
-        
-        # Step 2: Get liquid tickers using DYNAMIC filters based on macro conditions.
         market_regime = macro_data.get('market_regime', "Choppy 🟡")
         liquid_tickers = self._get_liquid_tickers(market_regime)
 
         if not liquid_tickers:
-            logger.warning("No symbols passed the liquidity filters for the current market regime.")
-            # Return a result that can still be reported
-            return {
-                "macro": macro_data,
-                "micro": {"bullish": [], "bearish": []}
-            }
+            logger.warning("No symbols passed liquidity filters for the current market regime.")
+            return {"macro": macro_data, "micro": {"bullish": [], "bearish": []}}
 
-        # Step 3: Analyze all liquid tickers in parallel.
-        bullish, bearish = self._screen_coins(liquid_tickers)
+        bullish, bearish = self._screen_coins(liquid_tickers, market_regime)
 
-        # Step 4: Combine all data into a final result object.
-        return {
-            "macro": macro_data,
-            "micro": {
-                "bullish": bullish,
-                "bearish": bearish
-            }
-        }
+        return {"macro": macro_data, "micro": {"bullish": bullish, "bearish": bearish}}
 
     def _analyze_macro_conditions(self) -> Dict:
-        """Analyzes BTC trend and market regime. Called only once per run."""
+        """Analyzes BTC trend and market regime."""
         logger.info("Analyzing macro conditions (BTC Trend & Market Regime)...")
         btc_df = self._get_kline_as_df("BTCUSDT", limit=config.KLINE_LIMIT)
         if btc_df is None or len(btc_df) < config.EMA_LONG_PERIOD:
-            return {"btc_trend": "Unknown ❓", "market_regime": "Unknown ❓", "atr_percent": 0}
+            return {"btc_trend": "Unknown ❓", "market_regime": "Unknown ❓"}
 
-        # --- BTC Trend Analysis (EMA Alignment) ---
         btc_df['ema_short'] = btc_df['close'].ewm(span=config.EMA_SHORT_PERIOD, adjust=False).mean()
         btc_df['ema_long'] = btc_df['close'].ewm(span=config.EMA_LONG_PERIOD, adjust=False).mean()
         latest = btc_df.iloc[0]
@@ -68,7 +48,6 @@ class MarketAnalyzer:
         elif latest['close'] < latest['ema_short'] < latest['ema_long']:
             btc_trend = "BEARISH 🔴"
         
-        # --- Market Regime Analysis (ATR) ---
         tr = pd.concat([
             btc_df['high'] - btc_df['low'],
             (btc_df['high'] - btc_df['close'].shift(-1)).abs(),
@@ -79,53 +58,37 @@ class MarketAnalyzer:
         atr_percent = (atr / latest['close']) * 100 if latest['close'] > 0 else 0
 
         market_regime = "Choppy 🟡"
-        if atr_percent > config.ATR_TRENDING_THRESHOLD: market_regime = "Trending ✅"
-        elif atr_percent < config.ATR_QUIET_THRESHOLD: market_regime = "Quiet / Ranging 🔴"
+        if atr_percent > config.ATR_TRENDING_THRESHOLD:
+            market_regime = "Trending ✅"
+        elif atr_percent < config.ATR_QUIET_THRESHOLD:
+            market_regime = "Quiet / Ranging 🔴"
         
-        logger.info(f"Macro analysis complete: BTC Trend is {btc_trend}, Market Regime is {market_regime} (ATR: {atr_percent:.2f}%)")
-        return {"btc_trend": btc_trend, "market_regime": market_regime, "atr_percent": atr_percent}
+        logger.info(f"Macro analysis complete: BTC Trend is {btc_trend}, Market Regime is {market_regime}")
+        return {"btc_trend": btc_trend, "market_regime": market_regime}
 
     def _get_liquid_tickers(self, market_regime: str) -> List[Dict]:
-        """
-        Fetches all linear tickers and applies DYNAMIC liquidity filters based on the market regime.
-        """
-        # Choose filter set based on market regime
-        if market_regime == "Trending ✅":
-            min_vol = config.STRICT_MIN_VOLUME_24H
-            min_oi = config.STRICT_MIN_OPEN_INTEREST
-            logger.info("Using STRICT liquidity filters for Trending market...")
-        else:
-            min_vol = config.RELAXED_MIN_VOLUME_24H
-            min_oi = config.RELAXED_MIN_OPEN_INTEREST
-            logger.info(f"Using RELAXED liquidity filters for {market_regime} market...")
+        """Fetches all linear tickers and applies DYNAMIC liquidity filters."""
+        min_vol, min_oi = (config.STRICT_MIN_VOLUME_24H, config.STRICT_MIN_OPEN_INTEREST) if market_regime == "Trending ✅" else (config.RELAXED_MIN_VOLUME_24H, config.RELAXED_MIN_OPEN_INTEREST)
+        logger.info(f"Using {'STRICT' if market_regime == 'Trending ✅' else 'RELAXED'} liquidity filters...")
 
         try:
             response = self.session.get_tickers(category="linear")
             if response['retCode'] == 0:
                 all_tickers = [t for t in response['result']['list'] if t['symbol'].endswith('USDT')]
-                liquid_tickers = [
-                    t for t in all_tickers if
-                    float(t.get('turnover24h', 0)) >= min_vol and
-                    float(t.get('openInterestValue', 0)) >= min_oi
-                ]
+                liquid_tickers = [t for t in all_tickers if float(t.get('turnover24h', 0)) >= min_vol and float(t.get('openInterestValue', 0)) >= min_oi]
                 logger.info(f"Found {len(liquid_tickers)} liquid symbols out of {len(all_tickers)}.")
                 return liquid_tickers
         except Exception as e:
             logger.error(f"Could not fetch or filter tickers: {e}")
         return []
 
-
     def _screen_coins(self, liquid_tickers: List[Dict], market_regime: str) -> Tuple[List[Dict], List[Dict]]:
-        """Analyzes a list of liquid tickers in parallel and returns ranked bullish/bearish lists."""
-        
-        # [ใหม่] Choose score threshold based on market regime
+        """Analyzes liquid tickers in parallel with a dynamic health score threshold."""
         min_health_score = config.STRICT_MIN_HEALTH_SCORE if market_regime == "Trending ✅" else config.RELAXED_MIN_HEALTH_SCORE
         logger.info(f"Using MINIMUM HEALTH SCORE of {min_health_score} for this scan.")
 
-        logger.info(f"Analyzing {len(liquid_tickers)} liquid symbols with {config.MAX_WORKERS} workers...")
         bullish, bearish = [], []
         with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as executor:
-            # [แก้ไข] ส่ง min_health_score เข้าไปใน _analyze_single_symbol
             future_to_ticker = {executor.submit(self._analyze_single_symbol, ticker, min_health_score): ticker for ticker in liquid_tickers}
             for future in as_completed(future_to_ticker):
                 result = future.result()
@@ -133,17 +96,14 @@ class MarketAnalyzer:
                     if result['trend_type'] == 'bullish': bullish.append(result)
                     elif result['trend_type'] == 'bearish': bearish.append(result)
         
-        bullish.sort(key=lambda x: (x.get('health_score', 0), float(x.get('price24hPcnt', 0))), reverse=True)
-        bearish.sort(key=lambda x: (x.get('health_score', 0), float(x.get('price24hPcnt', 0))), reverse=True)
+        bullish.sort(key=lambda x: x.get('health_score', 0), reverse=True)
+        bearish.sort(key=lambda x: x.get('health_score', 0), reverse=True)
         
         logger.info(f"Screening complete. Found {len(bullish)} bullish and {len(bearish)} bearish candidates.")
         return bullish[:config.TOP_BULLISH_COUNT], bearish[:config.TOP_BEARISH_COUNT]
-    
 
     def _analyze_single_symbol(self, ticker_data: Dict, min_health_score: int) -> Optional[Dict]:
-        """
-        Analyzes a single symbol using a scoring system with a dynamic threshold.
-        """
+        """Analyzes a single symbol using a scoring system with a dynamic threshold."""
         symbol = ticker_data['symbol']
         df = self._get_kline_as_df(symbol, limit=config.KLINE_LIMIT)
         if df is None or len(df) < config.EMA_LONG_PERIOD: return None
@@ -152,19 +112,19 @@ class MarketAnalyzer:
         df['ema_long'] = df['close'].ewm(span=config.EMA_LONG_PERIOD, adjust=False).mean()
         latest = df.iloc[0]
         
-        if pd.isna(latest['ema_short']) or pd.isna(latest['ema_long']) or latest['ema_short'] == 0: return None
+        if pd.isna(latest['ema_short']) or pd.isna(latest['ema_long']) or latest['ema_long'] == 0: return None
 
-        # --- Scoring System ---
         health_score = 0
-        ema_separation_percent = ((latest['ema_short'] - latest['ema_long']) / latest['ema_long']) * 100 if latest['ema_long'] > 0 else 0
+        ema_separation_percent = ((latest['ema_short'] - latest['ema_long']) / latest['ema_long']) * 100
         
-        is_uptrend_structure = ema_separation_percent > 0.2 # เพิ่ม Deadzone เล็กน้อย
-        is_downtrend_structure = ema_separation_percent < -0.2 # เพิ่ม Deadzone เล็กน้อย
+        # [แก้ไข BUG] ใช้ round() แทน int() และเอา deadzone ออก
+        if ema_separation_percent > 0: # Uptrend
+            health_score += min(50, round(ema_separation_percent * 10)) # ให้ 10 คะแนนต่อ 1%
+        else: # Downtrend
+            health_score += min(50, round(abs(ema_separation_percent) * 10))
 
-        if is_uptrend_structure:
-            health_score += min(50, int(ema_separation_percent * 5))
-        elif is_downtrend_structure:
-            health_score += min(50, int(abs(ema_separation_percent) * 5))
+        is_uptrend_structure = ema_separation_percent > 0
+        is_downtrend_structure = ema_separation_percent < 0
 
         if is_uptrend_structure and latest['close'] > latest['ema_short']:
             health_score += 30
@@ -175,11 +135,9 @@ class MarketAnalyzer:
         if abs(percent_diff_from_ema50) < config.MAX_DISTANCE_FROM_EMA_PERCENT:
             health_score += 20
 
-        # --- [แก้ไข] Final Decision with DYNAMIC threshold ---
         if health_score < min_health_score:
             return None
 
-        # --- Enrich Data ---
         ticker_data['trend_type'] = 'bullish' if is_uptrend_structure else 'bearish'
         ticker_data['health_score'] = health_score
         
@@ -190,9 +148,8 @@ class MarketAnalyzer:
         
         return ticker_data
     
-    
     def _get_kline_as_df(self, symbol: str, limit: int) -> Optional[pd.DataFrame]:
-        """Fetches k-line data and returns it as a pandas DataFrame, sorted descending by time."""
+        """Fetches k-line data and returns a pandas DataFrame, sorted descending by time."""
         try:
             response = self.session.get_kline(category="linear", symbol=symbol, interval=config.TIMEFRAME, limit=limit)
             if response['retCode'] == 0 and response['result']['list']:
