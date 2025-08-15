@@ -114,31 +114,35 @@ class MarketAnalyzer:
             logger.error(f"Could not fetch or filter tickers: {e}")
         return []
 
-    def _screen_coins(self, liquid_tickers: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
+
+    def _screen_coins(self, liquid_tickers: List[Dict], market_regime: str) -> Tuple[List[Dict], List[Dict]]:
         """Analyzes a list of liquid tickers in parallel and returns ranked bullish/bearish lists."""
+        
+        # [ใหม่] Choose score threshold based on market regime
+        min_health_score = config.STRICT_MIN_HEALTH_SCORE if market_regime == "Trending ✅" else config.RELAXED_MIN_HEALTH_SCORE
+        logger.info(f"Using MINIMUM HEALTH SCORE of {min_health_score} for this scan.")
+
         logger.info(f"Analyzing {len(liquid_tickers)} liquid symbols with {config.MAX_WORKERS} workers...")
         bullish, bearish = [], []
         with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as executor:
-            future_to_ticker = {executor.submit(self._analyze_single_symbol, ticker): ticker for ticker in liquid_tickers}
+            # [แก้ไข] ส่ง min_health_score เข้าไปใน _analyze_single_symbol
+            future_to_ticker = {executor.submit(self._analyze_single_symbol, ticker, min_health_score): ticker for ticker in liquid_tickers}
             for future in as_completed(future_to_ticker):
                 result = future.result()
                 if result:
                     if result['trend_type'] == 'bullish': bullish.append(result)
                     elif result['trend_type'] == 'bearish': bearish.append(result)
         
-        # Rank by 24h price change
         bullish.sort(key=lambda x: (x.get('health_score', 0), float(x.get('price24hPcnt', 0))), reverse=True)
-        bearish.sort(key=lambda x: (x.get('health_score', 0), float(x.get('price24hPcnt', 0))), reverse=True) # ฝั่ง Bearish ก็เรียงจากคะแนนสูงสุด
+        bearish.sort(key=lambda x: (x.get('health_score', 0), float(x.get('price24hPcnt', 0))), reverse=True)
         
         logger.info(f"Screening complete. Found {len(bullish)} bullish and {len(bearish)} bearish candidates.")
         return bullish[:config.TOP_BULLISH_COUNT], bearish[:config.TOP_BEARISH_COUNT]
-
     
 
-    def _analyze_single_symbol(self, ticker_data: Dict) -> Optional[Dict]:
+    def _analyze_single_symbol(self, ticker_data: Dict, min_health_score: int) -> Optional[Dict]:
         """
-        Analyzes a single symbol using a scoring system to find the best candidates
-        even in non-ideal market conditions. Returns enriched ticker_data or None.
+        Analyzes a single symbol using a scoring system with a dynamic threshold.
         """
         symbol = ticker_data['symbol']
         df = self._get_kline_as_df(symbol, limit=config.KLINE_LIMIT)
@@ -152,48 +156,41 @@ class MarketAnalyzer:
 
         # --- Scoring System ---
         health_score = 0
+        ema_separation_percent = ((latest['ema_short'] - latest['ema_long']) / latest['ema_long']) * 100 if latest['ema_long'] > 0 else 0
         
-        # 1. Trend Structure Score (Max 50 points)
-        # ให้คะแนนตามระยะห่างระหว่าง EMA ยิ่งห่างยิ่งดี
-        ema_separation_percent = ((latest['ema_short'] - latest['ema_long']) / latest['ema_long']) * 100
-        
-        is_uptrend_structure = ema_separation_percent > 0
-        is_downtrend_structure = ema_separation_percent < 0
+        is_uptrend_structure = ema_separation_percent > 0.2 # เพิ่ม Deadzone เล็กน้อย
+        is_downtrend_structure = ema_separation_percent < -0.2 # เพิ่ม Deadzone เล็กน้อย
 
         if is_uptrend_structure:
-            health_score += min(50, int(ema_separation_percent * 5)) # ให้ 5 คะแนนต่อทุกๆ 1% ที่ห่างกัน
+            health_score += min(50, int(ema_separation_percent * 5))
         elif is_downtrend_structure:
             health_score += min(50, int(abs(ema_separation_percent) * 5))
 
-        # 2. Price Location Score (Max 30 points)
-        # ราคาควรอยู่ฝั่งที่ถูกต้องของเทรนด์
         if is_uptrend_structure and latest['close'] > latest['ema_short']:
             health_score += 30
         elif is_downtrend_structure and latest['close'] < latest['ema_short']:
             health_score += 30
             
-        # 3. Not Overextended Score (Max 20 points)
-        percent_diff_from_ema50 = ((latest['close'] - latest['ema_short']) / latest['ema_short']) * 100
+        percent_diff_from_ema50 = ((latest['close'] - latest['ema_short']) / latest['ema_short']) * 100 if latest['ema_short'] > 0 else 0
         if abs(percent_diff_from_ema50) < config.MAX_DISTANCE_FROM_EMA_PERCENT:
             health_score += 20
 
-        # --- Final Decision ---
-        if health_score < 50: # ตั้งเกณฑ์คะแนนขั้นต่ำที่ยอมรับได้
+        # --- [แก้ไข] Final Decision with DYNAMIC threshold ---
+        if health_score < min_health_score:
             return None
 
         # --- Enrich Data ---
         ticker_data['trend_type'] = 'bullish' if is_uptrend_structure else 'bearish'
-        ticker_data['health_score'] = health_score # เพิ่มคะแนนเข้าไปในผลลัพธ์
+        ticker_data['health_score'] = health_score
         
         stage = "N/A"
         if is_uptrend_structure and percent_diff_from_ema50 >= 0:
-            if percent_diff_from_ema50 < config.EARLY_STAGE_MAX_PERCENT:
-                stage = "🌱 Early"
-            else:
-                stage = "🌳 Mid"
+            stage = "🌱 Early" if percent_diff_from_ema50 < config.EARLY_STAGE_MAX_PERCENT else "🌳 Mid"
         ticker_data['stage'] = stage
         
         return ticker_data
+    
+    
     def _get_kline_as_df(self, symbol: str, limit: int) -> Optional[pd.DataFrame]:
         """Fetches k-line data and returns it as a pandas DataFrame, sorted descending by time."""
         try:
