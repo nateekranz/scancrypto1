@@ -127,14 +127,19 @@ class MarketAnalyzer:
                     elif result['trend_type'] == 'bearish': bearish.append(result)
         
         # Rank by 24h price change
-        bullish.sort(key=lambda x: float(x.get('price24hPcnt', 0)), reverse=True)
-        bearish.sort(key=lambda x: float(x.get('price24hPcnt', 0)))
+        bullish.sort(key=lambda x: (x.get('health_score', 0), float(x.get('price24hPcnt', 0))), reverse=True)
+        bearish.sort(key=lambda x: (x.get('health_score', 0), float(x.get('price24hPcnt', 0))), reverse=True) # ฝั่ง Bearish ก็เรียงจากคะแนนสูงสุด
         
         logger.info(f"Screening complete. Found {len(bullish)} bullish and {len(bearish)} bearish candidates.")
         return bullish[:config.TOP_BULLISH_COUNT], bearish[:config.TOP_BEARISH_COUNT]
 
+    
+
     def _analyze_single_symbol(self, ticker_data: Dict) -> Optional[Dict]:
-        """Analyzes a single symbol's trend structure and stage. Returns enriched ticker_data or None."""
+        """
+        Analyzes a single symbol using a scoring system to find the best candidates
+        even in non-ideal market conditions. Returns enriched ticker_data or None.
+        """
         symbol = ticker_data['symbol']
         df = self._get_kline_as_df(symbol, limit=config.KLINE_LIMIT)
         if df is None or len(df) < config.EMA_LONG_PERIOD: return None
@@ -145,29 +150,50 @@ class MarketAnalyzer:
         
         if pd.isna(latest['ema_short']) or pd.isna(latest['ema_long']) or latest['ema_short'] == 0: return None
 
-        # Condition A: Trend Structure (Clear EMA alignment)
-        is_uptrend_structure = latest['ema_short'] > latest['ema_long']
-        is_downtrend_structure = latest['ema_short'] < latest['ema_long']
-        if not (is_uptrend_structure or is_downtrend_structure): return None
-
-        # Condition B: Not Overextended (Price is close to EMA_SHORT)
-        percent_diff = ((latest['close'] - latest['ema_short']) / latest['ema_short']) * 100
-        if abs(percent_diff) >= config.MAX_DISTANCE_FROM_EMA_PERCENT: return None
-
-        # Enrich ticker data with analysis results
-        ticker_data['trend_type'] = 'bullish' if is_uptrend_structure else 'bearish'
+        # --- Scoring System ---
+        health_score = 0
         
-        # Categorize Stage (for Uptrend candidates only)
+        # 1. Trend Structure Score (Max 50 points)
+        # ให้คะแนนตามระยะห่างระหว่าง EMA ยิ่งห่างยิ่งดี
+        ema_separation_percent = ((latest['ema_short'] - latest['ema_long']) / latest['ema_long']) * 100
+        
+        is_uptrend_structure = ema_separation_percent > 0
+        is_downtrend_structure = ema_separation_percent < 0
+
+        if is_uptrend_structure:
+            health_score += min(50, int(ema_separation_percent * 5)) # ให้ 5 คะแนนต่อทุกๆ 1% ที่ห่างกัน
+        elif is_downtrend_structure:
+            health_score += min(50, int(abs(ema_separation_percent) * 5))
+
+        # 2. Price Location Score (Max 30 points)
+        # ราคาควรอยู่ฝั่งที่ถูกต้องของเทรนด์
+        if is_uptrend_structure and latest['close'] > latest['ema_short']:
+            health_score += 30
+        elif is_downtrend_structure and latest['close'] < latest['ema_short']:
+            health_score += 30
+            
+        # 3. Not Overextended Score (Max 20 points)
+        percent_diff_from_ema50 = ((latest['close'] - latest['ema_short']) / latest['ema_short']) * 100
+        if abs(percent_diff_from_ema50) < config.MAX_DISTANCE_FROM_EMA_PERCENT:
+            health_score += 20
+
+        # --- Final Decision ---
+        if health_score < 50: # ตั้งเกณฑ์คะแนนขั้นต่ำที่ยอมรับได้
+            return None
+
+        # --- Enrich Data ---
+        ticker_data['trend_type'] = 'bullish' if is_uptrend_structure else 'bearish'
+        ticker_data['health_score'] = health_score # เพิ่มคะแนนเข้าไปในผลลัพธ์
+        
         stage = "N/A"
-        if is_uptrend_structure and percent_diff >= 0: # Price must be above short EMA for stage
-            if percent_diff < config.EARLY_STAGE_MAX_PERCENT:
+        if is_uptrend_structure and percent_diff_from_ema50 >= 0:
+            if percent_diff_from_ema50 < config.EARLY_STAGE_MAX_PERCENT:
                 stage = "🌱 Early"
-            else: # Up to MID_STAGE_MAX_PERCENT (same as MAX_DISTANCE)
+            else:
                 stage = "🌳 Mid"
         ticker_data['stage'] = stage
         
         return ticker_data
-
     def _get_kline_as_df(self, symbol: str, limit: int) -> Optional[pd.DataFrame]:
         """Fetches k-line data and returns it as a pandas DataFrame, sorted descending by time."""
         try:
